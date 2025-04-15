@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,7 +33,6 @@ type StdioMCPClientConfig struct {
 type SSEMCPClientConfig struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
-	Timeout int64             `json:"timeout"`
 }
 
 type MCPClientType string
@@ -84,27 +84,14 @@ func loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func cleanPath(path string) string {
-	// 移除前导的斜杠
-	path = strings.TrimPrefix(path, "/")
-
-	// 提取基本路径部分（比如 "exa"）和剩余部分
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) < 2 {
-		return "/" + path
-	}
-
-	basePath := parts[0]
-	remaining := parts[1]
-
-	// 如果包含 "sse/http" 或 "sse/https"，移除这部分并保留实际的消息路径
-	if strings.HasPrefix(remaining, "sse/http") {
-		if idx := strings.Index(remaining, "/message"); idx != -1 {
-			return fmt.Sprintf("/%s/message", basePath)
+	// 移除 "sse/http" 或 "sse/https" 的前缀
+	if idx := strings.Index(path, "/sse/http"); idx != -1 {
+		if strings.Contains(path, "/message") {
+			return path[:idx] + "/message"
 		}
-		return fmt.Sprintf("/%s/", basePath)
+		return path[:idx] + "/"
 	}
-
-	return "/" + path
+	return path
 }
 
 func main() {
@@ -157,7 +144,12 @@ func start(config *Config) {
 		Name:    config.Server.Name,
 		Version: config.Server.Version,
 	}
+
+	// 创建一个等待组来管理所有客户端的关闭
+	var closeGroup sync.WaitGroup
+
 	for name, clientConfig := range config.Clients {
+		name := name // 为闭包创建新的变量
 		log.Printf("Connecting to %s", name)
 		mcpClient, err := newMCPClient(clientConfig)
 		if err != nil {
@@ -188,9 +180,14 @@ func start(config *Config) {
 		log.Printf("- SSE endpoint: %s", sseBasePath)
 		log.Printf("- Message endpoint: %s", fmt.Sprintf("%smessage", sseBasePath))
 
+		// 注册关闭处理
+		closeGroup.Add(1)
 		httpServer.RegisterOnShutdown(func() {
-			log.Printf("Closing client %s", name)
-			_ = mcpClient.Close()
+			defer closeGroup.Done()
+			log.Printf("\n[DEBUG] Closing client %s", name)
+			if err := mcpClient.Close(); err != nil {
+				log.Printf("\n[ERROR] Error closing client %s: %v", name, err)
+			}
 		})
 	}
 	err := errorGroup.Wait()
@@ -211,17 +208,33 @@ func start(config *Config) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigChan
-	log.Println("\nShutdown signal received, stopping server...")
+	log.Println("\n[INFO] Shutdown signal received, stopping server...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 5*time.Second)
+	// 创建一个带超时的上下文用于关闭
+	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer shutdownCancel()
 
-	err = httpServer.Shutdown(shutdownCtx)
-	if err != nil {
-		log.Printf("Server shutdown error: %v", err)
-	} else {
-		log.Println("Server shutdown complete")
+	// 先关闭 HTTP 服务器
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("\n[ERROR] Server shutdown error: %v", err)
 	}
+
+	// 等待所有客户端关闭
+	closeWaitChan := make(chan struct{})
+	go func() {
+		closeGroup.Wait()
+		close(closeWaitChan)
+	}()
+
+	// 等待客户端关闭或超时
+	select {
+	case <-closeWaitChan:
+		log.Println("\n[INFO] All clients closed successfully")
+	case <-shutdownCtx.Done():
+		log.Println("\n[WARN] Shutdown timeout waiting for clients to close")
+	}
+
+	log.Println("\n[INFO] Server shutdown complete")
 }
 
 func parseMCPClientConfig(conf MCPClientConfig) (any, error) {
@@ -259,9 +272,6 @@ func newMCPClient(conf MCPClientConfig) (client.MCPClient, error) {
 		return client.NewStdioMCPClient(v.Command, envs, v.Args...)
 	case SSEMCPClientConfig:
 		var options []client.ClientOption
-		if v.Timeout > 0 {
-			options = append(options, client.WithSSEReadTimeout(time.Duration(v.Timeout)*time.Second))
-		}
 		if len(v.Headers) > 0 {
 			options = append(options, client.WithHeaders(v.Headers))
 		}
@@ -271,35 +281,53 @@ func newMCPClient(conf MCPClientConfig) (client.MCPClient, error) {
 }
 
 func addClient(ctx context.Context, clientInfo mcp.Implementation, mcpClient client.MCPClient, mcpServer *server.MCPServer) error {
+	// 使用带超时的上下文进行初始化
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	initRequest := mcp.InitializeRequest{}
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = clientInfo
-	_, err := mcpClient.Initialize(ctx, initRequest)
+	_, err := mcpClient.Initialize(initCtx, initRequest)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to initialize client: %w", err)
 	}
-	log.Printf("Successfully initialized MCP client")
+	log.Printf("\n[INFO] Successfully initialized MCP client")
 
-	err = addClientToolsToServer(ctx, mcpClient, mcpServer)
-	if err != nil {
-		return err
+	// 添加各种资源到服务器
+	if err = addClientToolsToServer(ctx, mcpClient, mcpServer); err != nil {
+		return fmt.Errorf("failed to add tools: %w", err)
 	}
-	_ = addClientPromptsToServer(ctx, mcpClient, mcpServer)
-	_ = addClientResourcesToServer(ctx, mcpClient, mcpServer)
-	_ = addClientResourceTemplatesToServer(ctx, mcpClient, mcpServer)
 
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = mcpClient.Ping(ctx)
-			}
+	// 使用 errgroup 并行添加其他资源
+	var g errgroup.Group
+
+	g.Go(func() error {
+		if err := addClientPromptsToServer(ctx, mcpClient, mcpServer); err != nil {
+			return fmt.Errorf("failed to add prompts: %w", err)
 		}
-	}()
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := addClientResourcesToServer(ctx, mcpClient, mcpServer); err != nil {
+			return fmt.Errorf("failed to add resources: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := addClientResourceTemplatesToServer(ctx, mcpClient, mcpServer); err != nil {
+			return fmt.Errorf("failed to add resource templates: %w", err)
+		}
+		return nil
+	})
+
+	// 等待所有资源添加完成
+	if err := g.Wait(); err != nil {
+		log.Printf("\n[WARN] Some resources failed to load: %v", err)
+	}
+
 	return nil
 }
 

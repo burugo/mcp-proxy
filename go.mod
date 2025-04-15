@@ -6,7 +6,7 @@ toolchain go1.24.1
 
 require (
 	github.com/TBXark/confstore v0.0.0-20250312091006-41b7721fb8c8
-	github.com/mark3labs/mcp-go v0.18.0
+	github.com/mark3labs/mcp-go v0.20.1
 	golang.org/x/sync v0.12.0
 )
 
