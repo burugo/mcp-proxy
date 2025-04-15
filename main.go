@@ -6,17 +6,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
 	"github.com/TBXark/confstore"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"golang.org/x/sync/errgroup"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 )
 
 var BuildVersion = "dev"
@@ -57,6 +59,54 @@ type Config struct {
 	Clients map[string]MCPClientConfig `json:"clients"`
 }
 
+// LoggingMiddleware wraps an http.Handler and logs request details
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startTime := time.Now()
+
+		// 记录请求开始
+		log.Printf("\n[%s] Request started: %s %s from %s",
+			r.Method,
+			r.URL.Path,
+			r.RemoteAddr,
+			r.Header.Get("User-Agent"),
+		)
+
+		next.ServeHTTP(w, r)
+
+		// 记录请求结束
+		log.Printf("\n[%s] Request completed: %s took %v",
+			r.Method,
+			r.URL.Path,
+			time.Since(startTime),
+		)
+	})
+}
+
+func cleanPath(path string) string {
+	// 移除前导的斜杠
+	path = strings.TrimPrefix(path, "/")
+
+	// 提取基本路径部分（比如 "exa"）和剩余部分
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) < 2 {
+		return "/" + path
+	}
+
+	basePath := parts[0]
+	remaining := parts[1]
+
+	// 如果包含 "sse/http" 或 "sse/https"，移除这部分并保留实际的消息路径
+	if strings.HasPrefix(remaining, "sse/http") {
+		if idx := strings.Index(remaining, "/message"); idx != -1 {
+			return fmt.Sprintf("/%s/message", basePath)
+		}
+		return fmt.Sprintf("/%s/", basePath)
+	}
+
+	return "/" + path
+}
+
 func main() {
 	conf := flag.String("config", "config.json", "path to config file or a http(s) url")
 	version := flag.Bool("version", false, "print version and exit")
@@ -84,9 +134,24 @@ func start(config *Config) {
 
 	var errorGroup errgroup.Group
 	httpMux := http.NewServeMux()
+
+	// 添加路径清理中间件
+	cleanPathHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originalPath := r.URL.Path
+		cleanedPath := cleanPath(originalPath)
+
+		// 记录路径清理的结果
+		if originalPath != cleanedPath {
+			log.Printf("\n[DEBUG] Path cleaned: %s -> %s", originalPath, cleanedPath)
+		}
+
+		r.URL.Path = cleanedPath
+		httpMux.ServeHTTP(w, r)
+	})
+
 	httpServer := &http.Server{
 		Addr:    config.Server.Addr,
-		Handler: httpMux,
+		Handler: loggingMiddleware(cleanPathHandler),
 	}
 	info := mcp.Implementation{
 		Name:    config.Server.Name,
@@ -114,7 +179,15 @@ func start(config *Config) {
 			}
 			return nil
 		})
-		httpMux.Handle(fmt.Sprintf("/%s/", name), sseServer)
+		sseBasePath := fmt.Sprintf("/%s/", name)
+		log.Printf("\n[DEBUG] Registering SSE server at path: %s", sseBasePath)
+		httpMux.Handle(sseBasePath, sseServer)
+
+		// 打印已注册的路由信息
+		log.Printf("\n[DEBUG] Server routes for %s:", name)
+		log.Printf("- SSE endpoint: %s", sseBasePath)
+		log.Printf("- Message endpoint: %s", fmt.Sprintf("%smessage", sseBasePath))
+
 		httpServer.RegisterOnShutdown(func() {
 			log.Printf("Closing client %s", name)
 			_ = mcpClient.Close()
@@ -138,7 +211,7 @@ func start(config *Config) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigChan
-	log.Println("Shutdown signal received")
+	log.Println("\nShutdown signal received, stopping server...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer shutdownCancel()
@@ -146,6 +219,8 @@ func start(config *Config) {
 	err = httpServer.Shutdown(shutdownCtx)
 	if err != nil {
 		log.Printf("Server shutdown error: %v", err)
+	} else {
+		log.Println("Server shutdown complete")
 	}
 }
 
@@ -219,8 +294,7 @@ func addClient(ctx context.Context, clientInfo mcp.Implementation, mcpClient cli
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("Context done, stopping ping")
-				break
+				return
 			case <-ticker.C:
 				_ = mcpClient.Ping(ctx)
 			}
