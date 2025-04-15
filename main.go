@@ -65,7 +65,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		startTime := time.Now()
 
 		// 记录请求开始
-		log.Printf("\n[%s] Request started: %s %s from %s",
+		log.Printf("[%s] Request started: %s %s from %s",
 			r.Method,
 			r.URL.Path,
 			r.RemoteAddr,
@@ -75,7 +75,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 
 		// 记录请求结束
-		log.Printf("\n[%s] Request completed: %s took %v",
+		log.Printf("[%s] Request completed: %s took %v",
 			r.Method,
 			r.URL.Path,
 			time.Since(startTime),
@@ -129,7 +129,7 @@ func start(config *Config) {
 
 		// 记录路径清理的结果
 		if originalPath != cleanedPath {
-			log.Printf("\n[DEBUG] Path cleaned: %s -> %s", originalPath, cleanedPath)
+			log.Printf("[DEBUG] Path cleaned: %s -> %s", originalPath, cleanedPath)
 		}
 
 		r.URL.Path = cleanedPath
@@ -172,11 +172,11 @@ func start(config *Config) {
 			return nil
 		})
 		sseBasePath := fmt.Sprintf("/%s/", name)
-		log.Printf("\n[DEBUG] Registering SSE server at path: %s", sseBasePath)
+		log.Printf("[DEBUG] Registering SSE server at path: %s", sseBasePath)
 		httpMux.Handle(sseBasePath, sseServer)
 
 		// 打印已注册的路由信息
-		log.Printf("\n[DEBUG] Server routes for %s:", name)
+		log.Printf("[DEBUG] Server routes for %s:", name)
 		log.Printf("- SSE endpoint: %s", sseBasePath)
 		log.Printf("- Message endpoint: %s", fmt.Sprintf("%smessage", sseBasePath))
 
@@ -184,9 +184,9 @@ func start(config *Config) {
 		closeGroup.Add(1)
 		httpServer.RegisterOnShutdown(func() {
 			defer closeGroup.Done()
-			log.Printf("\n[DEBUG] Closing client %s", name)
+			log.Printf("[DEBUG] Closing client %s", name)
 			if err := mcpClient.Close(); err != nil {
-				log.Printf("\n[ERROR] Error closing client %s: %v", name, err)
+				log.Printf("[ERROR] Error closing client %s: %v", name, err)
 			}
 		})
 	}
@@ -216,7 +216,7 @@ func start(config *Config) {
 
 	// 先关闭 HTTP 服务器
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("\n[ERROR] Server shutdown error: %v", err)
+		log.Printf("[ERROR] Server shutdown error: %v", err)
 	}
 
 	// 等待所有客户端关闭
@@ -229,12 +229,12 @@ func start(config *Config) {
 	// 等待客户端关闭或超时
 	select {
 	case <-closeWaitChan:
-		log.Println("\n[INFO] All clients closed successfully")
+		log.Println("[INFO] All clients closed successfully")
 	case <-shutdownCtx.Done():
-		log.Println("\n[WARN] Shutdown timeout waiting for clients to close")
+		log.Println("[WARN] Shutdown timeout waiting for clients to close")
 	}
 
-	log.Println("\n[INFO] Server shutdown complete")
+	log.Println("[INFO] Server shutdown complete")
 }
 
 func parseMCPClientConfig(conf MCPClientConfig) (any, error) {
@@ -292,7 +292,7 @@ func addClient(ctx context.Context, clientInfo mcp.Implementation, mcpClient cli
 	if err != nil {
 		return fmt.Errorf("failed to initialize client: %w", err)
 	}
-	log.Printf("\n[INFO] Successfully initialized MCP client")
+	log.Printf("[INFO] Successfully initialized MCP client")
 
 	// 添加各种资源到服务器
 	if err = addClientToolsToServer(ctx, mcpClient, mcpServer); err != nil {
@@ -325,7 +325,7 @@ func addClient(ctx context.Context, clientInfo mcp.Implementation, mcpClient cli
 
 	// 等待所有资源添加完成
 	if err := g.Wait(); err != nil {
-		log.Printf("\n[WARN] Some resources failed to load: %v", err)
+		log.Printf("[WARN] Some resources failed to load: %v", err)
 	}
 
 	return nil
