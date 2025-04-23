@@ -1,18 +1,44 @@
 {
-    "server": {
-      "baseURL": "http://localhost:8880",
-      "addr": ":8880",
-      "name": "MCP Proxy",
-      "version": "1.0.0"
+  "server": {
+    "baseURL": "http://localhost:8881",
+    "addr": ":8881",
+    "name": "MCP Proxy",
+    "version": "1.0.0"
+  },
+  "clients": {
+    "fetch": {
+      "type": "stdio",
+      "config": {
+        "command": "npx",
+        "env": {},
+        "args": [
+          "-y",
+          "fetcher-mcp"
+        ]
+      }
     },
-    "clients": {
-      "fetch": {
-        "type": "stdio",
-        "config": {
-          "command": "uvx",
-          "env": {},
-          "args": ["mcp-server-fetch"]
-        }
+    "exa": {
+      "type": "stdio",
+      "config": {
+        "command": "npx",
+        "env": {
+          "EXA_API_KEY": "23109599-13d3-465e-93e4-e91b678f8b9b"
+        },
+        "args": [
+          "-y",
+          "exa-mcp"
+        ]
+      }
+    },
+    "weather": {
+      "type": "stdio",
+      "config": {
+        "command": "weather-mcp-server",
+        "env": {
+          "WEATHER_API_KEY": "f66692a7bbeb45abb23175530251404"
+        },
+        "args": []
       }
     }
   }
+}
