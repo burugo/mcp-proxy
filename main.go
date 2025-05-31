@@ -72,6 +72,14 @@ func loggingMiddleware(next http.Handler) http.Handler {
 			r.Header.Get("User-Agent"),
 		)
 
+		// Log all request headers
+		headersBytes, err := json.Marshal(r.Header)
+		if err != nil {
+			log.Printf("[%s] Error marshalling request headers: %v", r.Method, err)
+		} else {
+			log.Printf("[%s] Request headers: %s", r.Method, string(headersBytes))
+		}
+
 		next.ServeHTTP(w, r)
 
 		// 记录请求结束
